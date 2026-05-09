@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: crypto
+          POSTGRES_PASSWORD: crypto
+          POSTGRES_DB: crypto
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Java 17 (for PySpark)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tests/requirements.txt
+          pip install -r producer/requirements.txt
+          pip install pyspark==3.5.0 apache-airflow==2.9.2
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format check (ruff format --check)
+        run: ruff format --check .
+
+      - name: Run tests (pytest)
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: crypto
+          POSTGRES_USER: crypto
+          POSTGRES_PASSWORD: crypto
+          AIRFLOW_HOME: ${{ github.workspace }}/.airflow_ci
+          AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+          AIRFLOW__CORE__DAGS_FOLDER: ${{ github.workspace }}/airflow/dags
+        run: |
+          mkdir -p $AIRFLOW_HOME
+          airflow db migrate
+          pytest -v --tb=short
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build all images (no push)
+        run: |
+          docker compose build --pull

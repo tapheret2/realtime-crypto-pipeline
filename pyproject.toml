@@ -1,0 +1,47 @@
+[project]
+name = "realtime-crypto-pipeline"
+version = "0.1.0"
+description = "End-to-end real-time crypto data pipeline (Kafka + Spark + Airflow + Postgres)"
+authors = [{ name = "tapheret2" }]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+  ".venv",
+  "airflow/logs",
+  "spark-warehouse",
+  "metastore_db",
+  "checkpoints",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+  "SIM", # flake8-simplify
+  "C4",  # flake8-comprehensions
+]
+ignore = [
+  "E501",  # line too long — handled by formatter
+  "B008",  # function call in default argument — common with Airflow operators
+]
+
+[tool.ruff.lint.per-file-ignores]
+"airflow/dags/*" = ["E402"]  # Airflow DAG imports often happen after constants
+"tests/*" = ["B011"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "integration: requires running services",
+  "slow: long-running tests",
+]

@@ -1,0 +1,5 @@
+pytest==8.3.3
+pytest-mock==3.14.0
+ruff==0.7.4
+responses==0.25.3
+pyspark==3.5.0

@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+checkpoints/
+spark-events/
+
+# Airflow
+airflow/logs/
+airflow/airflow.db
+airflow/airflow.cfg
+airflow/webserver_config.py
+airflow/standalone_admin_password.txt
+
+# Docker
+.docker/
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Local data dumps
+data/
+*.parquet
+*.csv
+*.duckdb
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db
+desktop.ini

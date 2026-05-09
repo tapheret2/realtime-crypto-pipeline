@@ -1,0 +1,200 @@
+# realtime-crypto-pipeline — Docker Compose stack
+#
+# Services:
+#   - kafka         : single-broker Kafka in KRaft mode
+#   - postgres      : warehouse + Airflow metadata DB
+#   - producer      : CoinGecko -> Kafka publisher
+#   - spark         : Spark master + worker (single node)
+#   - spark-stream  : Spark Structured Streaming consumer (auto-restart)
+#   - airflow-init  : one-shot DB upgrade + admin user
+#   - airflow       : webserver + scheduler (LocalExecutor)
+#   - dashboard     : Streamlit dashboard
+#
+# Bring up with:  docker compose up -d
+# Tear down with: docker compose down -v
+
+x-airflow-common: &airflow-common
+  build: ./airflow
+  environment:
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR:-LocalExecutor}
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES:-False}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-crypto}:${POSTGRES_PASSWORD:-crypto}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: UTC
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth"
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_DB: ${POSTGRES_DB:-crypto}
+    POSTGRES_USER: ${POSTGRES_USER:-crypto}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  # ------------------------------------------------------------------------
+  # Kafka (KRaft mode — no Zookeeper)
+  # ------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: crypto-kafka
+    hostname: kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------------------
+  # PostgreSQL — warehouse + Airflow metastore
+  # ------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: crypto-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-crypto}
+      POSTGRES_USER: ${POSTGRES_USER:-crypto}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crypto} -d ${POSTGRES_DB:-crypto}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------------------
+  # Producer — CoinGecko -> Kafka
+  # ------------------------------------------------------------------------
+  producer:
+    build: ./producer
+    container_name: crypto-producer
+    environment:
+      COINS: ${COINS:-bitcoin,ethereum,solana}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
+      COINGECKO_BASE_URL: ${COINGECKO_BASE_URL:-https://api.coingecko.com/api/v3}
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC_RAW: ${KAFKA_TOPIC_RAW:-crypto.prices.raw}
+      LOG_LEVEL: INFO
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: on-failure
+
+  # ------------------------------------------------------------------------
+  # Spark Streaming — minute aggregations from Kafka -> Postgres
+  # ------------------------------------------------------------------------
+  spark-stream:
+    build: ./spark
+    container_name: crypto-spark-stream
+    command: >
+      spark-submit
+        --master local[2]
+        --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.3
+        /opt/spark/jobs/streaming_aggregator.py
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC_RAW: ${KAFKA_TOPIC_RAW:-crypto.prices.raw}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-crypto}
+      POSTGRES_USER: ${POSTGRES_USER:-crypto}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto}
+      SPARK_CHECKPOINT_DIR: /opt/spark/checkpoints/streaming
+      SPARK_LOG_LEVEL: ${SPARK_LOG_LEVEL:-WARN}
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs
+      - spark-checkpoints:/opt/spark/checkpoints
+    ports:
+      - "4040:4040"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  # ------------------------------------------------------------------------
+  # Airflow — orchestration
+  # ------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    container_name: crypto-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-airflow}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-airflow}" \
+          --firstname Air --lastname Flow \
+          --role Admin --email admin@example.com || true
+
+  airflow:
+    <<: *airflow-common
+    container_name: crypto-airflow
+    command: bash -c "airflow scheduler & exec airflow webserver"
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: on-failure
+
+  # ------------------------------------------------------------------------
+  # Streamlit dashboard
+  # ------------------------------------------------------------------------
+  dashboard:
+    build: ./dashboard
+    container_name: crypto-dashboard
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-crypto}
+      POSTGRES_USER: ${POSTGRES_USER:-crypto}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-crypto}
+      DASHBOARD_REFRESH_SECONDS: ${DASHBOARD_REFRESH_SECONDS:-10}
+    ports:
+      - "${DASHBOARD_PORT:-8501}:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  postgres-data:
+  spark-checkpoints:
